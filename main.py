@@ -151,7 +151,7 @@ def summarize_with_gemini_once(title, article_text):
 """
 
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash-lite",
         contents=prompt,
     )
 
