@@ -1,6 +1,6 @@
 import json
 import os
-import re
+import time
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -52,14 +52,12 @@ def find_latest_patch_note():
     soup = BeautifulSoup(html, "html.parser")
 
     links = soup.find_all("a", href=True)
-
     candidates = []
 
     for link in links:
         href = link.get("href", "")
         text = link.get_text(" ", strip=True)
 
-        # パッチノート記事のURLっぽいものを探す
         if "/news/game-updates/" in href and "patch-notes" in href:
             url = urljoin("https://playvalorant.com", href)
 
@@ -74,7 +72,6 @@ def find_latest_patch_note():
                 }
             )
 
-    # 重複URLを削除
     seen = set()
     unique_candidates = []
 
@@ -93,7 +90,6 @@ def extract_article_text(url):
     html = fetch_html(url)
     soup = BeautifulSoup(html, "html.parser")
 
-    # 不要な要素を消す
     for tag in soup(["script", "style", "nav", "footer", "header"]):
         tag.decompose()
 
@@ -101,10 +97,8 @@ def extract_article_text(url):
     if article:
         text = article.get_text("\n", strip=True)
     else:
-        # articleタグが取れない場合の保険
         text = soup.get_text("\n", strip=True)
 
-    # 空行を整理
     lines = []
     for line in text.splitlines():
         line = line.strip()
@@ -113,11 +107,10 @@ def extract_article_text(url):
 
     cleaned_text = "\n".join(lines)
 
-    # 長すぎると無料枠やDiscord投稿で困るので少し削る
     return cleaned_text[:25000]
 
 
-def summarize_with_gemini(title, article_text):
+def summarize_with_gemini_once(title, article_text):
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY が設定されていません。")
 
@@ -158,14 +151,36 @@ def summarize_with_gemini(title, article_text):
 """
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-2.0-flash",
         contents=prompt,
     )
 
-    summary = response.text.strip()
+    if not response.text:
+        raise RuntimeError("Geminiから空の返答が返ってきました。")
 
-    # Discord Embedの説明文は長すぎると失敗するので短くする
+    summary = response.text.strip()
     return summary[:3500]
+
+
+def summarize_with_gemini_retry(title, article_text, max_retries=5):
+    wait_seconds = 10
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"Gemini要約を実行します。試行 {attempt}/{max_retries}")
+            return summarize_with_gemini_once(title, article_text)
+
+        except Exception as e:
+            error_text = str(e)
+            print(f"Gemini要約に失敗しました。試行 {attempt}/{max_retries}")
+            print(error_text)
+
+            if attempt == max_retries:
+                raise RuntimeError("Gemini要約が最大試行回数を超えて失敗しました。") from e
+
+            print(f"{wait_seconds}秒待って再試行します。")
+            time.sleep(wait_seconds)
+            wait_seconds *= 2
 
 
 def post_to_discord(title, url, summary):
@@ -209,11 +224,7 @@ def main():
     article_text = extract_article_text(url)
 
     print("Geminiで要約します。")
-    try:
-        summary = summarize_with_gemini(title, article_text)
-    except Exception as e:
-        print(f"Gemini要約に失敗しました: {e}")
-        summary = "AI要約に失敗しました。公式ページを確認してください。"
+    summary = summarize_with_gemini_retry(title, article_text)
 
     print("Discordに投稿します。")
     post_to_discord(title, url, summary)
